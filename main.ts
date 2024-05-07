@@ -126,5 +126,26 @@ namespace RobotActionneurs {
     export function pwm_on_off(channel: PWMPin, active: boolean) {
 
     }
+}
 
+//% weight=100 color=#154eab icon=""
+//* groups="['Phares', 'Neopixels', 'Contrôle']"
+namespace RobotAfficheurs {
+    //% block="Allumer phares en $color || luminosité $luminosity"
+    //% group="Phares"
+    //% expandableArgumentMode="enabled"
+    //% color.shadow="colorNumberPicker"
+    //% luminosity.min=0 luminosity.max=100
+    export function bigRGBOn(color: number, luminosity: number) {
+
+    }
+
+    //% block="Eteindre les phares"
+    //% group="Phares"
+    export function bigRGBOff() {
+
+    }
+
+    //% group="Neopixels"
+    //% group="Contrôle"
 }
