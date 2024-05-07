@@ -41,7 +41,8 @@ enum MotorDirection {
 }
 
 //% weight=100 color=#129635 icon=""
-namespace RobotMotors {
+//* groups="['Moteurs', 'Servo-moteurs', 'PWM']"
+namespace RobotActionneurs {
     /**
      - mouvement $direction || vitesse || (pendant $duration | sans s'arrêter=0)
      */
@@ -54,6 +55,7 @@ namespace RobotMotors {
      * @param duration durée de rotation avant arrêt du moteur ; par défaut, pas d'arrêt automatique
      */
     //% block="Modifier le moteur $motor en $direction || vitesse $speed | pendant $duration"
+    //% group="Moteurs"
     //% inlineInputMode=inline
     //% duration.shadow=timePicker
     //% speed.min=0 speed.max=255
@@ -72,6 +74,7 @@ namespace RobotMotors {
      * @param duration durée du mouvement avant arrêt du robot ; par défaut, pas d'arrêt automatique
      */
     //% block="Le robot va $direction || vitesse $speed | pendant $duration"
+    //% group="Moteurs"
     //% inlineInputMode=inline
     //% duration.shadow=timePicker
     //% speed.min=0 speed.max=255
