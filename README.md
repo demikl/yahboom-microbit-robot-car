@@ -1,6 +1,12 @@
 
 > Ouvrir cette page à [https://demikl.github.io/yahboom-microbit-robot-car/](https://demikl.github.io/yahboom-microbit-robot-car/)
 
+# Yahboom Microbit Robot Car extension for Makecode
+
+The [Yahboom robot car](http://www.yahboom.net/study/Bitbot) has an [official extension](https://github.com/lzty634158/yahboom_mbit_en) that expose lots of function and blocks to Makecode. Some of them seems to be for internal usage and, IMHO, don't serve as "high level" functions. My extension aims to provide only ready-to-use and easy to understand actions and sensors.
+
+![http://www.yahboom.net/Public/images/newsimg/5ff5243b6111f.jpg]
+
 ## Utiliser comme extension
 
 Ce dépôt peut être ajouté en tant qu'**extension** dans MakeCode.

@@ -1,10 +1,8 @@
 {
     "name": "yahboom-microbit-robot-car",
-    "description": "",
+    "description": "Interact with the Yahboom Microbit Robot Car motors, lights and sensors",
     "dependencies": {
-        "core": "*",
-        "radio": "*",
-        "microphone": "*"
+        "core": "*"
     },
     "files": [
         "main.blocks",
