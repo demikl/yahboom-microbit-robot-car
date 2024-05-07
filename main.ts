@@ -40,6 +40,18 @@ enum MotorDirection {
     Stop
 }
 
+enum ServoPin {
+    J2,
+    J3,
+    J4
+}
+
+enum PWMPin {
+    L9,
+    L10,
+    L11
+}
+
 //% weight=100 color=#129635 icon=""
 //* groups="['Moteurs', 'Servo-moteurs', 'PWM']"
 namespace RobotActionneurs {
@@ -85,6 +97,35 @@ namespace RobotActionneurs {
                                   speed?: number,
                                   duration?: number) {
         
+    }
+
+    //% block Positionner le servo-moteur $servo sur position $position
+    //% group="Servo-moteurs"
+    //% position.shadow="protractorPicker"
+    export function servo_set_position(servo: ServoPin, position: number) {
+
+    }
+
+    //% block servo-moteur $servo $active
+    //% group="Servo-moteurs"
+    //% active.shadow="toggleOnOff"
+    export function servo_on_off(servo: ServoPin, active: boolean) {
+
+    }
+
+    //% block Activer PWM $channel cycle actif de $start à $end
+    //% group="PWM"
+    //% start.min=0 start.max=4096
+    //% end.min=0 end.max=4096
+    export function pwm_set(channel: PWMPin, start: number, end: number) {
+
+    }
+
+    //% block Canal PWM $channel $active
+    //% group="PWM"
+    //% active.shadow="toggleOnOff"
+    export function pwm_on_off(channel: PWMPin, active: boolean) {
+
     }
 
 }
