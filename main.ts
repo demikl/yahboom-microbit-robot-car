@@ -113,7 +113,7 @@ namespace RobotActionneurs {
 
     }
 
-    //% block="Activer PWM $channel au ratio $dutyCyclePercentage %
+    //% block="Activer PWM $channel au ratio $dutyCyclePercentage %"
     //% group="PWM"
     //% dutyCyclePercentage.min=0 dutyCyclePercentage.max=100
     export function pwm_set(channel: PWMPin, dutyCyclePercentage: number) {
