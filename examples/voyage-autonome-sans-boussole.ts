@@ -7,8 +7,28 @@ const SEUIL_CHOC = 900; // Variation d'accélération, en milli-g, sur deux lect
 const ACTIVER_CHOC_LATERAL = false;
 const MS_PAR_90_DEGRES = 1000; // Hypothèse à étalonner sur le robot.
 const SENS_FREINAGE_Z = 1; // Écran vers l'avant : inverser si les logs montrent le freinage en Z négatif.
+const DISTANCE_OBSTACLE = 10;
+const DISTANCE_RALENTISSEMENT = 60;
+const MS_PAUSE_CHOC = 200;
+const MS_RECUL = 350;
+const MS_VERIFICATION = 900;
+const MS_ENTRE_MESURES = 150;
+const MS_AVANT_CHOC = 800;
+const MS_NOIR = 200;
+const MS_BLANC = 1000;
+const MS_BOUCLE = 20;
+const MESURES_CONFIRMATION = 2;
 
-let etat = 0; // 0=avance, 1=pause choc, 2=recule, 3=pivote, 4=arrêt sécurité, 5=vérifie distance
+enum EtatTrajet {
+    Avance,
+    PauseChoc,
+    Recule,
+    Pivote,
+    ArretSecurite,
+    VerifieDistance
+}
+
+let etat = EtatTrajet.Avance;
 let horsSol = true;
 let debutNoir = -1;
 let debutBlanc = -1;
@@ -38,6 +58,8 @@ let finVerification = 0;
 let prochaineVerification = 0;
 let lecturesProches = 0;
 let lecturesLibres = 0;
+let ligneGaucheNoire = false;
+let ligneDroiteNoire = false;
 
 function arreter(): void {
     RobotActionneurs.RobotMovement(MovementDirection.Stop);
@@ -46,7 +68,7 @@ function arreter(): void {
 }
 
 function securite(message: string): void {
-    etat = 4;
+    etat = EtatTrajet.ArretSecurite;
     chocDetecte = false;
     arreter();
     serial.writeLine("ARRET SECURITE : " + message);
@@ -54,11 +76,20 @@ function securite(message: string): void {
 }
 
 function interruptionDemandee(): boolean {
-    return etat == 4 || horsSol;
+    return etat == EtatTrajet.ArretSecurite || horsSol;
+}
+
+function nomEtat(): string {
+    if (etat == EtatTrajet.Avance) return "avance";
+    if (etat == EtatTrajet.PauseChoc) return "pause choc";
+    if (etat == EtatTrajet.Recule) return "recule";
+    if (etat == EtatTrajet.Pivote) return "pivote";
+    if (etat == EtatTrajet.VerifieDistance) return "verifie distance";
+    return "arret securite";
 }
 
 function commencerPivot(reessai: boolean = false): void {
-    if (etat == 4 || horsSol) return;
+    if (interruptionDemandee()) return;
     let angleVise = Math.randomRange(100, 170);
     if (!reessai) {
         sensPivotPrecedent = Math.randomRange(0, 1) == 0
@@ -68,11 +99,11 @@ function commencerPivot(reessai: boolean = false): void {
     tentativesPivot = reessai ? 2 : 1;
     let duree = Math.round(angleVise * MS_PAR_90_DEGRES / 90);
     let vitessePivot = reessai ? VITESSE_PIVOT_REESSAI : VITESSE_PIVOT;
-    etat = 3;
+    etat = EtatTrajet.Pivote;
     chocDetecte = false;
 
     RobotActionneurs.RobotMovement(sensPivotPrecedent, vitessePivot, 0);
-    if (etat != 3 || horsSol) {
+    if (interruptionDemandee() || etat != EtatTrajet.Pivote) {
         arreter();
         return;
     }
@@ -84,16 +115,41 @@ function commencerPivot(reessai: boolean = false): void {
 }
 
 function commencerAvance(): void {
-    if (etat == 4 || horsSol) return;
-    etat = 0;
+    if (interruptionDemandee()) return;
+    etat = EtatTrajet.Avance;
     tentativesPivot = 0;
     chocDetecte = false;
     prochaineCourbe = 0;
     prochainUltrason = 0;
     prochainRapportUltrason = 0;
-    detectionChocActiveApres = input.runningTime() + 800;
+    detectionChocActiveApres = input.runningTime() + MS_AVANT_CHOC;
     vitesseGauche = -1;
     vitesseDroite = -1;
+}
+
+function vitessePourDistance(distanceMesuree: number): number {
+    // Aucun écho conserve ici le comportement historique : vitesse maximale.
+    if (distanceMesuree < DISTANCE_OBSTACLE ||
+        distanceMesuree >= DISTANCE_RALENTISSEMENT) return VITESSE_MAX;
+    return VITESSE_MIN + Math.round(
+        (distanceMesuree - DISTANCE_OBSTACLE) * (VITESSE_MAX - VITESSE_MIN) /
+        (DISTANCE_RALENTISSEMENT - DISTANCE_OBSTACLE)
+    );
+}
+
+function reglerRoues(gauche: number, droite: number): void {
+    if (gauche == vitesseGauche && droite == vitesseDroite) return;
+    RobotActionneurs.ChangeMotor(MotorSide.Left, MotorDirection.Forward, gauche, 0);
+    RobotActionneurs.ChangeMotor(MotorSide.Right, MotorDirection.Forward, droite, 0);
+    if (interruptionDemandee()) {
+        arreter();
+        return;
+    }
+    if (vitesseGauche < 0 && vitesseDroite < 0) {
+        detectionChocActiveApres = input.runningTime() + MS_AVANT_CHOC;
+    }
+    vitesseGauche = gauche;
+    vitesseDroite = droite;
 }
 
 // Écran vers l'avant : X est latéral, Z est longitudinal.
@@ -111,7 +167,7 @@ basic.forever(function () {
     let freinage = SENS_FREINAGE_Z * deltaZ;
 
     let maintenant = input.runningTime();
-    if (!horsSol && etat == 0) {
+    if (!horsSol && etat == EtatTrajet.Avance) {
         picLateral = Math.max(picLateral, lateral);
         picFreinage = Math.max(picFreinage, freinage);
         picAcceleration = Math.max(picAcceleration, -freinage);
@@ -137,11 +193,13 @@ basic.forever(function () {
             picSerieLaterale = Math.max(picSerieLaterale, serieLaterale);
             picSerieFreinage = Math.max(picSerieFreinage, serieFreinage);
 
-            if ((ACTIVER_CHOC_LATERAL && serieLaterale >= 2) || serieFreinage >= 2) {
+            if ((ACTIVER_CHOC_LATERAL && serieLaterale >= MESURES_CONFIRMATION) ||
+                serieFreinage >= MESURES_CONFIRMATION) {
                 chocDetecte = true;
                 serial.writeLine("Choc confirme " +
-                    (ACTIVER_CHOC_LATERAL && serieLaterale >= 2 ? "lateral" : "avant") +
-                    " : dX=" + deltaX + " dZ=" + deltaZ + " mg (seuil " + SEUIL_CHOC + " x2)");
+                    (ACTIVER_CHOC_LATERAL && serieLaterale >= MESURES_CONFIRMATION ? "lateral" : "avant") +
+                    " : dX=" + deltaX + " dZ=" + deltaZ + " mg (seuil " +
+                    SEUIL_CHOC + " x" + MESURES_CONFIRMATION + ")");
             }
         } else {
             serieLaterale = 0;
@@ -180,11 +238,17 @@ input.onButtonPressed(Button.AB, function () {
     securite("boutons A+B");
 });
 
-arreter();
 serial.writeLine("Pret : poser le robot au sol");
+basic.forever(function () {
+    serial.writeLine("Etat : " + nomEtat() + " horsSol=" + horsSol +
+        " ligneG=" + (ligneGaucheNoire ? "noir" : "blanc") +
+        " ligneD=" + (ligneDroiteNoire ? "noir" : "blanc"));
+    basic.pause(1000);
+});
+arreter();
 
 basic.forever(function () {
-    if (etat == 4) {
+    if (etat == EtatTrajet.ArretSecurite) {
         basic.pause(100);
         return;
     }
@@ -192,12 +256,14 @@ basic.forever(function () {
     let maintenant = input.runningTime();
     let noirGauche = RobotCapteurs.line_is_black(MotorSide.Left);
     let noirDroit = RobotCapteurs.line_is_black(MotorSide.Right);
+    ligneGaucheNoire = noirGauche;
+    ligneDroiteNoire = noirDroit;
 
     if (noirGauche && noirDroit) {
         debutBlanc = -1;
         if (debutNoir < 0) debutNoir = maintenant;
 
-        if (!horsSol && maintenant - debutNoir >= 200) {
+        if (!horsSol && maintenant - debutNoir >= MS_NOIR) {
             horsSol = true;
             chocDetecte = false;
             arreter();
@@ -211,7 +277,7 @@ basic.forever(function () {
         // Un seul capteur blanc ne suffit pas : il faut les deux.
         if (!noirGauche && !noirDroit) {
             if (debutBlanc < 0) debutBlanc = maintenant;
-            if (maintenant - debutBlanc >= 1000) {
+            if (maintenant - debutBlanc >= MS_BLANC) {
                 horsSol = false;
                 debutBlanc = -1;
                 commencerAvance();
@@ -220,64 +286,64 @@ basic.forever(function () {
         } else {
             debutBlanc = -1;
         }
-        basic.pause(20);
+        basic.pause(MS_BOUCLE);
         return;
     }
 
-    if (etat == 1) {
+    if (etat == EtatTrajet.PauseChoc) {
         if (maintenant >= finEtape) {
             RobotActionneurs.RobotMovement(MovementDirection.Backward, VITESSE_RECUL, 0);
             if (interruptionDemandee()) {
                 arreter();
-                basic.pause(20);
+                basic.pause(MS_BOUCLE);
                 return;
             }
-            etat = 2;
-            finEtape = input.runningTime() + 350;
+            etat = EtatTrajet.Recule;
+            finEtape = input.runningTime() + MS_RECUL;
         }
-    } else if (etat == 2) {
+    } else if (etat == EtatTrajet.Recule) {
         if (maintenant >= finEtape) {
             commencerPivot();
         }
-    } else if (etat == 3) {
+    } else if (etat == EtatTrajet.Pivote) {
         if (maintenant >= finEtape) {
             arreter();
             if (interruptionDemandee()) {
-                basic.pause(20);
+                basic.pause(MS_BOUCLE);
                 return;
             }
-            etat = 5;
-            finVerification = input.runningTime() + 900;
+            etat = EtatTrajet.VerifieDistance;
+            finVerification = input.runningTime() + MS_VERIFICATION;
             prochaineVerification = 0;
             lecturesProches = 0;
             lecturesLibres = 0;
             serial.writeLine("Pivot temporise termine : verification ultrason");
         }
-    } else if (etat == 5) {
+    } else if (etat == EtatTrajet.VerifieDistance) {
         if (maintenant >= prochaineVerification) {
             let distanceVerifiee = RobotCapteurs.distance_cm();
-            if (etat != 5 || horsSol) {
-                basic.pause(20);
+            if (etat != EtatTrajet.VerifieDistance || horsSol) {
+                basic.pause(MS_BOUCLE);
                 return;
             }
-            prochaineVerification = input.runningTime() + 150;
+            prochaineVerification = input.runningTime() + MS_ENTRE_MESURES;
             serial.writeLine("Apres pivot " + tentativesPivot + "/2 : " +
                 distanceVerifiee + " cm" +
                 (distanceVerifiee == 0 ? " (aucun echo)" : ""));
             if (distanceVerifiee == 0) {
                 lecturesProches = 0;
                 lecturesLibres = 0;
-            } else if (distanceVerifiee < 10) {
+            } else if (distanceVerifiee < DISTANCE_OBSTACLE) {
                 lecturesProches++;
                 lecturesLibres = 0;
             } else {
                 lecturesLibres++;
                 lecturesProches = 0;
             }
-            if (lecturesLibres >= 2) {
+            if (lecturesLibres >= MESURES_CONFIRMATION) {
                 serial.writeLine("Voie libre confirmee : reprise");
                 commencerAvance();
-            } else if (lecturesProches >= 2) {
+            } else if (lecturesProches >= MESURES_CONFIRMATION) {
                 if (tentativesPivot == 1) {
                     serial.writeLine("Obstacle persistant : pivot de secours");
                     commencerPivot(true);
@@ -295,34 +361,35 @@ basic.forever(function () {
         if (chocDetecte) {
             chocDetecte = false;
             arreter();
-            if (etat == 4 || horsSol) {
-                basic.pause(20);
+            if (interruptionDemandee()) {
+                basic.pause(MS_BOUCLE);
                 return;
             }
             tentativesPivot = 0;
-            etat = 1;
-            finEtape = input.runningTime() + 200;
+            etat = EtatTrajet.PauseChoc;
+            finEtape = input.runningTime() + MS_PAUSE_CHOC;
             serial.writeLine("Choc : arrêt, recul, puis pivot");
         } else {
             if (maintenant >= prochainUltrason) {
                 distance = RobotCapteurs.distance_cm();
-                if (etat == 4 || horsSol) {
-                    basic.pause(20);
+                if (interruptionDemandee()) {
+                    basic.pause(MS_BOUCLE);
                     return;
                 }
                 let instantMesure = input.runningTime();
-                prochainUltrason = instantMesure + 150;
-                if (distance > 0 && distance < 10) {
-                    serial.writeLine("Ultrason : obstacle a " + distance + " cm (<10), pivot immediat");
+                prochainUltrason = instantMesure + MS_ENTRE_MESURES;
+                if (distance > 0 && distance < DISTANCE_OBSTACLE) {
+                    serial.writeLine("Ultrason : obstacle a " + distance +
+                        " cm (<" + DISTANCE_OBSTACLE + "), pivot immediat");
                 } else if (instantMesure >= prochainRapportUltrason) {
                     let situation = distance == 0 ? "aucun echo, vitesse max"
-                        : distance < 60 ? "ralentissement" : "voie libre, vitesse max";
+                        : distance < DISTANCE_RALENTISSEMENT ? "ralentissement" : "voie libre, vitesse max";
                     serial.writeLine("Ultrason : " + distance + " cm, " + situation);
                     prochainRapportUltrason = instantMesure + 500;
                 }
             }
 
-            if (distance > 0 && distance < 10) {
+            if (distance > 0 && distance < DISTANCE_OBSTACLE) {
                 // Pas de recul ni de pause pour un obstacle simplement détecté.
                 commencerPivot();
             } else {
@@ -331,33 +398,15 @@ basic.forever(function () {
                     prochaineCourbe = maintenant + Math.randomRange(1000, 2200);
                 }
 
-                // 0 = aucun écho : traité comme « rien en vue ».
-                let vitesse = VITESSE_MAX;
-                if (distance >= 10 && distance < 60) {
-                    vitesse = VITESSE_MIN +
-                        Math.round((distance - 10) * (VITESSE_MAX - VITESSE_MIN) / 50);
-                }
+                let vitesse = vitessePourDistance(distance);
 
                 let gauche = Math.max(VITESSE_MIN, Math.min(255, vitesse + courbe));
                 let droite = Math.max(VITESSE_MIN, Math.min(255, vitesse - courbe));
 
-                if (gauche != vitesseGauche || droite != vitesseDroite) {
-                    RobotActionneurs.ChangeMotor(MotorSide.Left, MotorDirection.Forward, gauche, 0);
-                    RobotActionneurs.ChangeMotor(MotorSide.Right, MotorDirection.Forward, droite, 0);
-                    if (etat == 4 || horsSol) {
-                        arreter();
-                        basic.pause(20);
-                        return;
-                    }
-                    if (vitesseGauche < 0 && vitesseDroite < 0) {
-                        detectionChocActiveApres = input.runningTime() + 800;
-                    }
-                    vitesseGauche = gauche;
-                    vitesseDroite = droite;
-                }
+                reglerRoues(gauche, droite);
             }
         }
     }
 
-    basic.pause(20);
+    basic.pause(MS_BOUCLE);
 });
