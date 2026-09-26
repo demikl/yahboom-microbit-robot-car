@@ -17,6 +17,11 @@ const MS_AVANT_CHOC = 800;
 const MS_NOIR = 200;
 const MS_BLANC = 1000;
 const MS_BOUCLE = 20;
+const MS_VOIE_LIBRE = 500;
+const MS_CLIGNOTANT = 400;
+const COULEUR_CLIGNOTANT = 0xFF8000;
+const PIXEL_GAUCHE = 1;
+const PIXEL_DROIT = 3;
 const MESURES_CONFIRMATION = 2;
 
 enum EtatTrajet {
@@ -35,9 +40,13 @@ let debutBlanc = -1;
 let finEtape = 0;
 let prochainUltrason = 0;
 let prochainRapportUltrason = 0;
-let prochaineCourbe = 0;
-let courbe = 0;
 let distance = 0;
+let sensEvitement = 0;
+let debutVoieLibre = -1;
+let modeSignalActuel = 3;
+let signalAllume = false;
+let debutClignotement = 0;
+let flecheHorsSolAffichee = false;
 let vitesseGauche = -1;
 let vitesseDroite = -1;
 let chocDetecte = false;
@@ -71,8 +80,50 @@ function securite(message: string): void {
     etat = EtatTrajet.ArretSecurite;
     chocDetecte = false;
     arreter();
+    actualiserSignaux();
+    flecheHorsSolAffichee = false;
     serial.writeLine("ARRET SECURITE : " + message);
     basic.showIcon(IconNames.No);
+}
+
+function afficherFlecheHorsSol(): void {
+    if (flecheHorsSolAffichee) return;
+    basic.showIcon(IconNames.Cow);
+    flecheHorsSolAffichee = true;
+}
+
+function effacerFlecheHorsSol(): void {
+    if (!flecheHorsSolAffichee) return;
+    flecheHorsSolAffichee = false;
+    basic.clearScreen();
+}
+
+function actualiserSignaux(): void {
+    let mode = 0;
+    if (!horsSol && etat != EtatTrajet.ArretSecurite) {
+        mode = etat == EtatTrajet.Avance ? sensEvitement : 2;
+    }
+    let maintenant = input.runningTime();
+    let modeChange = mode != modeSignalActuel;
+    if (modeChange) {
+        modeSignalActuel = mode;
+        debutClignotement = maintenant;
+    }
+    let allume = mode != 0 &&
+        (maintenant - debutClignotement) % (2 * MS_CLIGNOTANT) < MS_CLIGNOTANT;
+    if (!modeChange && allume == signalAllume) return;
+
+    RobotAfficheurs.pixels_off();
+    if (allume) {
+        if (mode == -1 || mode == 2) RobotAfficheurs.pixel_on(PIXEL_GAUCHE, COULEUR_CLIGNOTANT);
+        if (mode == 1 || mode == 2) RobotAfficheurs.pixel_on(PIXEL_DROIT, COULEUR_CLIGNOTANT);
+    }
+    if (allume && mode == 2) {
+        RobotAfficheurs.bigRGBOn(COULEUR_CLIGNOTANT);
+    } else {
+        RobotAfficheurs.bigRGBOff();
+    }
+    signalAllume = allume;
 }
 
 function interruptionDemandee(): boolean {
@@ -119,7 +170,9 @@ function commencerAvance(): void {
     etat = EtatTrajet.Avance;
     tentativesPivot = 0;
     chocDetecte = false;
-    prochaineCourbe = 0;
+    sensEvitement = 0;
+    debutVoieLibre = -1;
+    distance = 0;
     prochainUltrason = 0;
     prochainRapportUltrason = 0;
     detectionChocActiveApres = input.runningTime() + MS_AVANT_CHOC;
@@ -129,7 +182,7 @@ function commencerAvance(): void {
 
 function vitessePourDistance(distanceMesuree: number): number {
     // Aucun écho conserve ici le comportement historique : vitesse maximale.
-    if (distanceMesuree < DISTANCE_OBSTACLE ||
+    if (distanceMesuree <= DISTANCE_OBSTACLE ||
         distanceMesuree >= DISTANCE_RALENTISSEMENT) return VITESSE_MAX;
     return VITESSE_MIN + Math.round(
         (distanceMesuree - DISTANCE_OBSTACLE) * (VITESSE_MAX - VITESSE_MIN) /
@@ -267,6 +320,8 @@ basic.forever(function () {
             horsSol = true;
             chocDetecte = false;
             arreter();
+            actualiserSignaux();
+            afficherFlecheHorsSol();
             serial.writeLine("Suspendu : deux capteurs noirs");
         }
     } else {
@@ -280,6 +335,7 @@ basic.forever(function () {
             if (maintenant - debutBlanc >= MS_BLANC) {
                 horsSol = false;
                 debutBlanc = -1;
+                effacerFlecheHorsSol();
                 commencerAvance();
                 serial.writeLine("Reprise du trajet");
             }
@@ -333,7 +389,7 @@ basic.forever(function () {
             if (distanceVerifiee == 0) {
                 lecturesProches = 0;
                 lecturesLibres = 0;
-            } else if (distanceVerifiee < DISTANCE_OBSTACLE) {
+            } else if (distanceVerifiee <= DISTANCE_OBSTACLE) {
                 lecturesProches++;
                 lecturesLibres = 0;
             } else {
@@ -378,35 +434,51 @@ basic.forever(function () {
                 }
                 let instantMesure = input.runningTime();
                 prochainUltrason = instantMesure + MS_ENTRE_MESURES;
-                if (distance > 0 && distance < DISTANCE_OBSTACLE) {
+                if (distance > 0 && distance <= DISTANCE_OBSTACLE) {
                     serial.writeLine("Ultrason : obstacle a " + distance +
-                        " cm (<" + DISTANCE_OBSTACLE + "), pivot immediat");
+                        " cm (<=" + DISTANCE_OBSTACLE + "), pivot immediat");
                 } else if (instantMesure >= prochainRapportUltrason) {
                     let situation = distance == 0 ? "aucun echo, vitesse max"
-                        : distance < DISTANCE_RALENTISSEMENT ? "ralentissement" : "voie libre, vitesse max";
+                        : distance < DISTANCE_RALENTISSEMENT ? "ralentissement et virage" : "voie libre, vitesse max";
                     serial.writeLine("Ultrason : " + distance + " cm, " + situation);
                     prochainRapportUltrason = instantMesure + 500;
                 }
             }
 
-            if (distance > 0 && distance < DISTANCE_OBSTACLE) {
+            if (distance > 0 && distance <= DISTANCE_OBSTACLE) {
                 // Pas de recul ni de pause pour un obstacle simplement détecté.
                 commencerPivot();
             } else {
-                if (maintenant >= prochaineCourbe) {
-                    courbe = Math.randomRange(-18, 18);
-                    prochaineCourbe = maintenant + Math.randomRange(1000, 2200);
+                let instant = input.runningTime();
+                let evitementDistant = distance > DISTANCE_OBSTACLE &&
+                    distance < DISTANCE_RALENTISSEMENT;
+                if (evitementDistant) {
+                    debutVoieLibre = -1;
+                    if (sensEvitement == 0) {
+                        sensEvitement = Math.randomRange(0, 1) == 0 ? -1 : 1;
+                    }
+                } else if (distance >= DISTANCE_RALENTISSEMENT) {
+                    if (debutVoieLibre < 0) debutVoieLibre = instant;
+                    if (instant - debutVoieLibre >= MS_VOIE_LIBRE) sensEvitement = 0;
+                } else {
+                    // Aucun écho ne confirme pas que la voie est libre.
+                    debutVoieLibre = -1;
                 }
 
                 let vitesse = vitessePourDistance(distance);
-
-                let gauche = Math.max(VITESSE_MIN, Math.min(255, vitesse + courbe));
-                let droite = Math.max(VITESSE_MIN, Math.min(255, vitesse - courbe));
+                let supplement = evitementDistant
+                    ? Math.round((DISTANCE_RALENTISSEMENT - distance) *
+                        (VITESSE_MAX - VITESSE_MIN) /
+                        (DISTANCE_RALENTISSEMENT - DISTANCE_OBSTACLE))
+                    : 0;
+                let gauche = vitesse + (sensEvitement == 1 ? supplement : 0);
+                let droite = vitesse + (sensEvitement == -1 ? supplement : 0);
 
                 reglerRoues(gauche, droite);
             }
         }
     }
 
+    actualiserSignaux();
     basic.pause(MS_BOUCLE);
 });
