@@ -1,11 +1,12 @@
 const VITESSE_MIN = 45;
 const VITESSE_MAX = 110;
-const VITESSE_PIVOT = 25;
+const VITESSE_PIVOT = 55;
 const VITESSE_PIVOT_REESSAI = 65;
 const VITESSE_RECUL = 55;
 const SEUIL_CHOC = 900; // Variation d'accélération, en milli-g, sur deux lectures consécutives.
 const ACTIVER_CHOC_LATERAL = false;
-const MS_PAR_90_DEGRES = 1000; // Hypothèse à étalonner sur le robot.
+const MS_PAR_90_DEGRES = 1000; // Premier pivot : hypothèse à étalonner sur le robot.
+const MS_PAR_90_DEGRES_REESSAI = 400; // Réessai à 65/255 : durée réduite après observation d'un pivot de 300 à 320°.
 const SENS_FREINAGE_Z = 1; // Écran vers l'avant : inverser si les logs montrent le freinage en Z négatif.
 const DISTANCE_OBSTACLE = 10;
 const DISTANCE_RALENTISSEMENT = 60;
@@ -20,8 +21,8 @@ const MS_BOUCLE = 20;
 const MS_VOIE_LIBRE = 500;
 const MS_CLIGNOTANT = 400;
 const COULEUR_CLIGNOTANT = 0xFF8000;
-const PIXEL_GAUCHE = 1;
-const PIXEL_DROIT = 3;
+const PIXEL_GAUCHE = 3;
+const PIXEL_DROIT = 1;
 const MESURES_CONFIRMATION = 2;
 
 enum EtatTrajet {
@@ -139,6 +140,16 @@ function nomEtat(): string {
     return "arret securite";
 }
 
+function commencerEvitement(raison: string): void {
+    arreter();
+    if (interruptionDemandee()) return;
+    chocDetecte = false;
+    tentativesPivot = 0;
+    etat = EtatTrajet.PauseChoc;
+    finEtape = input.runningTime() + MS_PAUSE_CHOC;
+    serial.writeLine(raison + " : arret, recul, puis pivot");
+}
+
 function commencerPivot(reessai: boolean = false): void {
     if (interruptionDemandee()) return;
     let angleVise = Math.randomRange(100, 170);
@@ -148,7 +159,8 @@ function commencerPivot(reessai: boolean = false): void {
             : MovementDirection.CounterClockwise;
     }
     tentativesPivot = reessai ? 2 : 1;
-    let duree = Math.round(angleVise * MS_PAR_90_DEGRES / 90);
+    let msPar90Degres = reessai ? MS_PAR_90_DEGRES_REESSAI : MS_PAR_90_DEGRES;
+    let duree = Math.round(angleVise * msPar90Degres / 90);
     let vitessePivot = reessai ? VITESSE_PIVOT_REESSAI : VITESSE_PIVOT;
     etat = EtatTrajet.Pivote;
     chocDetecte = false;
@@ -415,16 +427,7 @@ basic.forever(function () {
     } else {
         // Le choc prime sur l'évitement préventif.
         if (chocDetecte) {
-            chocDetecte = false;
-            arreter();
-            if (interruptionDemandee()) {
-                basic.pause(MS_BOUCLE);
-                return;
-            }
-            tentativesPivot = 0;
-            etat = EtatTrajet.PauseChoc;
-            finEtape = input.runningTime() + MS_PAUSE_CHOC;
-            serial.writeLine("Choc : arrêt, recul, puis pivot");
+            commencerEvitement("Choc");
         } else {
             if (maintenant >= prochainUltrason) {
                 distance = RobotCapteurs.distance_cm();
@@ -436,7 +439,7 @@ basic.forever(function () {
                 prochainUltrason = instantMesure + MS_ENTRE_MESURES;
                 if (distance > 0 && distance <= DISTANCE_OBSTACLE) {
                     serial.writeLine("Ultrason : obstacle a " + distance +
-                        " cm (<=" + DISTANCE_OBSTACLE + "), pivot immediat");
+                        " cm (<=" + DISTANCE_OBSTACLE + ")");
                 } else if (instantMesure >= prochainRapportUltrason) {
                     let situation = distance == 0 ? "aucun echo, vitesse max"
                         : distance < DISTANCE_RALENTISSEMENT ? "ralentissement et virage" : "voie libre, vitesse max";
@@ -446,8 +449,7 @@ basic.forever(function () {
             }
 
             if (distance > 0 && distance <= DISTANCE_OBSTACLE) {
-                // Pas de recul ni de pause pour un obstacle simplement détecté.
-                commencerPivot();
+                commencerEvitement("Obstacle proche");
             } else {
                 let instant = input.runningTime();
                 let evitementDistant = distance > DISTANCE_OBSTACLE &&
