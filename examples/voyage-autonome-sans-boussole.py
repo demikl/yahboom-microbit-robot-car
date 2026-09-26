@@ -2,6 +2,7 @@
 # apres avoir importe l'extension Yahboom de ce depot.
 # Ce n'est pas le MicroPython classique : MakeCode fournit ici basic, input,
 # RobotCapteurs, RobotActionneurs et RobotAfficheurs.
+# Pose le robot droit au depart : les inclinaisons sont comparees a sa pose initiale.
 # Premier essai : roues decollees du sol, avec un adulte a proximite.
 #
 # Repere "blocs -> Python" : def cree un bloc personnalise ; if / elif / else
@@ -15,16 +16,19 @@
 # Vitesses des moteurs : l'extension attend une valeur entre 0 et 255.
 VITESSE_MIN = 45                 # Rouler lentement pres d'un obstacle.
 VITESSE_MAX = 110                # Rouler quand la route parait degagee.
-VITESSE_PIVOT = 55               # Tourner sur place au premier essai.
-VITESSE_PIVOT_REESSAI = 65       # Tourner sur place au dernier essai.
+VITESSE_PIVOT = 65               # Consigne constante pour chaque pivot.
 VITESSE_RECUL = 55               # Vitesse de la courte marche arriere.
+VARIATION_CHAMP_MAX = 35         # Variation maximale de la norme X/Z en %.
+PAS_MAGNETIQUE_MAX = 30          # Saut d'angle maximal entre deux lectures.
+MS_SANS_ROTATION = 500          # Arret si aucune rotation magnetique mesuree.
 
 # Un choc est un changement BRUSQUE d'acceleration, mesure en milli-g.
 SEUIL_CHOC = 900                 # Valeur a depasser deux fois pour confirmer.
 ACTIVER_CHOC_LATERAL = False     # False : observer X sans reagir aux chocs de cote.
-MS_PAR_90_DEGRES = 1000         # Duree estimee pour tourner de 90 degres a 55.
-MS_PAR_90_DEGRES_REESSAI = 400  # Duree estimee pour 90 degres a 65.
 SENS_FREINAGE_Z = 1             # Inverser en -1 si le freinage pointe vers -Z.
+SEUIL_INCLINAISON = 30          # Ecart en degres sur pitch ou roll.
+MS_INCLINAISON = 200            # Eviter qu'une breve secousse suspende le robot.
+MS_PIVOT_MAX = 3000            # Limite de securite du pivot mesure.
 
 # L'ultrason mesure des centimetres ; 0 signifie qu'il n'a recu aucun echo.
 DISTANCE_OBSTACLE = 10          # A 10 cm ou moins : arret, recul, pivot.
@@ -62,6 +66,10 @@ class SentinelleDuSol:
         self.hors_sol = True             # Au depart, ne pas rouler avant de verifier le sol.
         self.debut_noir = -1             # Heure du premier "deux noirs" ; -1 = pas commence.
         self.debut_blanc = -1            # Heure du premier "deux blancs" ; -1 = pas commence.
+        self.debut_inclinaison = -1      # Debut d'une inclinaison durable.
+        self.incline = False            # Le robot a bascule depuis sa pose initiale.
+        self.pitch_initial = None       # Pose de reference au premier controle du sol.
+        self.roll_initial = None
         self.ligne_gauche_noire = False  # Derniere couleur vue a gauche.
         self.ligne_droite_noire = False  # Derniere couleur vue a droite.
 
@@ -70,6 +78,30 @@ class SentinelleDuSol:
         # Retour : -1 = souleve, 1 = repose, 0 = aucun changement.
         self.ligne_gauche_noire = RobotCapteurs.line_is_black(MotorSide.LEFT)
         self.ligne_droite_noire = RobotCapteurs.line_is_black(MotorSide.RIGHT)
+        pitch = input.rotation(Rotation.PITCH)
+        roll = input.rotation(Rotation.ROLL)
+        if self.pitch_initial is None:
+            self.pitch_initial = pitch
+            self.roll_initial = roll
+        # L'ecart circulaire evite un faux basculement au passage de 180 a -180.
+        ecart_pitch = abs((pitch - self.pitch_initial + 180) % 360 - 180)
+        ecart_roll = abs((roll - self.roll_initial + 180) % 360 - 180)
+        penche = ecart_pitch >= SEUIL_INCLINAISON or ecart_roll >= SEUIL_INCLINAISON
+        if penche:
+            if self.debut_inclinaison < 0:
+                self.debut_inclinaison = maintenant
+            if maintenant - self.debut_inclinaison >= MS_INCLINAISON:
+                self.incline = True
+        else:
+            self.debut_inclinaison = -1
+            self.incline = False
+
+        if self.incline:
+            self.debut_blanc = -1
+            if not self.hors_sol:
+                self.hors_sol = True
+                return -1
+            return 0
 
         # "and" signifie que les DEUX capteurs doivent voir du noir.
         if self.ligne_gauche_noire and self.ligne_droite_noire:
@@ -84,8 +116,8 @@ class SentinelleDuSol:
             self.debut_noir = -1
 
         if self.hors_sol:
-            # Pour repartir, les DEUX capteurs doivent voir du blanc pendant 1 s.
-            if not self.ligne_gauche_noire and not self.ligne_droite_noire:
+            # Pour repartir, les DEUX capteurs doivent voir du blanc et le robot etre droit.
+            if not self.ligne_gauche_noire and not self.ligne_droite_noire and not penche:
                 if self.debut_blanc < 0:
                     self.debut_blanc = maintenant
                 if maintenant - self.debut_blanc >= MS_BLANC:
@@ -444,10 +476,17 @@ class CapitaineDuVoyage:
         self.eclaireur = EclaireurUltrason()       # Il propose les vitesses et les virages.
         self.mecanicien = MecanicienDesRoues()     # Il envoie les commandes aux moteurs.
         self.signaleur = SignaleurDesLumieres()    # Il commande les lumieres.
-        self.fin_etape = 0                         # Heure prevue pour terminer recul/pivot/pause.
+        self.fin_etape = 0                         # Heure prevue pour terminer recul/pause.
         self.fin_verification = 0                  # Limite de temps apres pivot.
         self.tentatives_pivot = 0                  # 0 avant pivot, 1 puis 2 au dernier essai.
         self.sens_pivot_precedent = MovementDirection.CLOCKWISE  # Garde le meme sens au reessai.
+        self.angle_vise = 0
+        self.angle_parcouru = 0
+        self.champ_x = 0
+        self.champ_z = 0
+        self.norme_champ = 0
+        self.debut_pivot = 0
+        self.dernier_progres = 0
 
     def interruption_demandee(self):
         # "or" signifie qu'une SEULE des deux conditions suffit pour stopper.
@@ -477,30 +516,82 @@ class CapitaineDuVoyage:
         serial.write_line(raison + " : arret, recul, puis pivot")
 
     def ordonner_un_pivot(self, reessai=False):
-        # reessai vaut False au premier pivot, True au dernier essai.
-        # Sans boussole, l'angle n'est PAS mesure : c'est une estimation par temps.
+        # Le second pivot contourne l'obstacle avec la MEME vitesse que le premier.
         if self.interruption_demandee():
             return
-        angle_vise = randint(100, 170)  # Angle aleatoire souhaite, en degres.
+        # La carte est verticale (ecran vers l'avant) : X et Z sont horizontaux.
+        x = input.magnetic_force(Dimension.X)
+        z = input.magnetic_force(Dimension.Z)
+        if self.interruption_demandee():
+            return
+        norme = x * x + z * z
+        if norme == 0:
+            self.declarer_l_urgence("champ magnetique horizontal nul")
+            return
+        self.angle_vise = randint(100, 170)
         if not reessai:
             # Le premier sens est aleatoire ; le deuxieme garde le meme sens.
             self.sens_pivot_precedent = (MovementDirection.CLOCKWISE if randint(0, 1) == 0
                                          else MovementDirection.COUNTER_CLOCKWISE)
         self.tentatives_pivot = 2 if reessai else 1
-        ms_par_90 = MS_PAR_90_DEGRES_REESSAI if reessai else MS_PAR_90_DEGRES  # Etalonnage.
-        duree = Math.round(angle_vise * ms_par_90 / 90)  # Regle de trois pour l'angle.
-        vitesse = VITESSE_PIVOT_REESSAI if reessai else VITESSE_PIVOT  # Consigne moteur.
+        self.angle_parcouru = 0
+        self.champ_x = x
+        self.champ_z = z
+        self.norme_champ = norme
         self.etat = PIVOTE
         self.vigie.oublier_le_choc()
-        self.mecanicien.pivoter(self.sens_pivot_precedent, vitesse)
+        self.mecanicien.pivoter(self.sens_pivot_precedent, VITESSE_PIVOT)
         # Un autre evenement peut avoir interrompu le mouvement entre-temps.
         if self.interruption_demandee() or self.etat != PIVOTE:
             self.mecanicien.immobiliser()
             return
-        self.fin_etape = input.running_time() + duree
+        self.debut_pivot = input.running_time()
+        self.dernier_progres = self.debut_pivot
         serial.write_line("Pivot " + str(self.tentatives_pivot) + "/2 : " +
-                          str(angle_vise) + " degres estimes, " + str(duree) +
-                          " ms, vitesse " + str(vitesse))
+                          "cible magnetique " + str(self.angle_vise) +
+                          " degres, vitesse " + str(VITESSE_PIVOT))
+
+    def suivre_le_pivot(self, maintenant):
+        # Le delai prime sur la lecture : ne jamais prolonger un pivot bloque.
+        if maintenant - self.debut_pivot >= MS_PIVOT_MAX:
+            self.declarer_l_urgence("pivot non confirme dans le delai maximal")
+            return
+        x = input.magnetic_force(Dimension.X)
+        z = input.magnetic_force(Dimension.Z)
+        if self.interruption_demandee() or self.etat != PIVOTE:
+            self.mecanicien.immobiliser()
+            return
+        norme = x * x + z * z
+        if (norme == 0 or
+            abs(norme - self.norme_champ) * 100 > VARIATION_CHAMP_MAX * self.norme_champ):
+            self.declarer_l_urgence("champ magnetique instable pendant le pivot")
+            return
+        # atan2 du produit vectoriel et scalaire donne un pas signe sur X/Z.
+        # Vu de dessus, le champ tourne dans le sens oppose au robot.
+        croise = self.champ_x * z - self.champ_z * x
+        scalaire = self.champ_x * x + self.champ_z * z
+        pas = Math.atan2(croise, scalaire) * 180 / Math.PI
+        if self.sens_pivot_precedent == MovementDirection.COUNTER_CLOCKWISE:
+            pas = -pas
+        if abs(pas) > PAS_MAGNETIQUE_MAX:
+            self.declarer_l_urgence("saut magnetique pendant le pivot")
+            return
+        self.angle_parcouru = max(0, self.angle_parcouru + pas)
+        self.champ_x = x
+        self.champ_z = z
+        if pas >= 1:
+            self.dernier_progres = input.running_time()
+        if self.angle_parcouru >= self.angle_vise:
+            self.mecanicien.immobiliser()
+            if self.interruption_demandee():
+                return
+            self.etat = VERIFIE_DISTANCE
+            self.fin_verification = input.running_time() + MS_VERIFICATION
+            self.eclaireur.preparer_la_verification()
+            serial.write_line("Pivot magnetique : " + str(Math.round(self.angle_parcouru)) +
+                              " degres, verification ultrason")
+        elif input.running_time() - self.dernier_progres >= MS_SANS_ROTATION:
+            self.declarer_l_urgence("pivot sans rotation magnetique")
 
     def reprendre_la_marche(self):
         # Repart apres une suspension ou une voie libre CONFIRMEE apres pivot.
@@ -546,19 +637,19 @@ class CapitaineDuVoyage:
         maintenant = input.running_time()  # Heure utilisee pour les delais.
         changement_sol = self.sentinelle.inspecter_le_sol(maintenant)  # -1, 0 ou 1.
         if changement_sol == -1:
-            # Deux capteurs noirs longtemps : STOP et dessin de la vache.
+            # Sol ou inclinaison suspects : STOP et dessin de la vache.
             self.vigie.oublier_le_choc()
             self.mecanicien.immobiliser()
             self.signaleur.agiter_les_signaux(True, self.etat, self.eclaireur.sens_evitement)
             self.signaleur.montrer_la_suspension()
-            serial.write_line("Suspendu : deux capteurs noirs")
+            serial.write_line("Suspendu : capteurs noirs ou inclinaison")
 
         if self.sentinelle.hors_sol:
             # Tant que les deux blancs ne sont pas confirmes, ne pas avancer.
             basic.pause(MS_BOUCLE)
             return
         if changement_sol == 1:
-            # Deux blancs pendant 1 seconde : reprise automatique.
+            # Deux blancs et robot redresse pendant 1 seconde : reprise.
             self.signaleur.effacer_la_suspension()
             self.reprendre_la_marche()
             serial.write_line("Reprise du trajet")
@@ -581,16 +672,7 @@ class CapitaineDuVoyage:
             if maintenant >= self.fin_etape:
                 self.ordonner_un_pivot()
         elif self.etat == PIVOTE:
-            if maintenant >= self.fin_etape:
-                # Le temps estime est termine, mais l'angle reel reste inconnu.
-                self.mecanicien.immobiliser()
-                if self.interruption_demandee():
-                    basic.pause(MS_BOUCLE)
-                    return
-                self.etat = VERIFIE_DISTANCE
-                self.fin_verification = input.running_time() + MS_VERIFICATION
-                self.eclaireur.preparer_la_verification()
-                serial.write_line("Pivot temporise termine : verification ultrason")
+            self.suivre_le_pivot(maintenant)
         elif self.etat == VERIFIE_DISTANCE:
             # Deux mesures libres font repartir ; deux proches provoquent
             # un seul pivot de secours, puis un arret si elles restent proches.
@@ -607,7 +689,7 @@ class CapitaineDuVoyage:
                     self.reprendre_la_marche()
                 elif issue == -1:
                     if self.tentatives_pivot == 1:
-                        serial.write_line("Obstacle persistant : pivot de secours")
+                        serial.write_line("Obstacle persistant : nouveau pivot magnetique")
                         self.ordonner_un_pivot(True)
                     else:
                         self.declarer_l_urgence("obstacle persistant apres pivot de secours")
@@ -679,10 +761,9 @@ def boucle_du_trajet():
 # On DONNE les noms de fonctions aux blocs evenementiels, sans parentheses :
 # MakeCode les rappellera plus tard. Avec des parentheses, elles seraient
 # executees tout de suite au lieu d'etre enregistrees !
-basic.forever(boucle_des_chocs)
 input.on_button_pressed(Button.AB, bouton_urgence)
-serial.write_line("Pret : poser le robot au sol")
-basic.forever(boucle_du_rapport)
-# Le robot est immobilise avant que sa boucle de trajet ne demarre.
 capitaine.mecanicien.immobiliser()
+serial.write_line("Pret : poser le robot droit au sol")
+basic.forever(boucle_des_chocs)
+basic.forever(boucle_du_rapport)
 basic.forever(boucle_du_trajet)

@@ -1,3 +1,4 @@
+import math
 import runpy
 import unittest
 from pathlib import Path
@@ -15,6 +16,11 @@ class Materiel:
         self.distance = 100
         self.acceleration_x = 0
         self.acceleration_z = 0
+        self.pitch = 90
+        self.roll = 0
+        self.angle_magnetique = 0
+        self.force_x = None
+        self.force_z = None
         self.commandes = []
         self.logs = []
         self.icones = []
@@ -28,6 +34,7 @@ class Materiel:
                 STOP=0, BACKWARD=1, CLOCKWISE=2, COUNTER_CLOCKWISE=3
             ),
             "Dimension": SimpleNamespace(X=0, Z=2),
+            "Rotation": SimpleNamespace(PITCH=0, ROLL=1),
             "Button": SimpleNamespace(AB=3),
             "IconNames": SimpleNamespace(COW=1, NO=2),
             "RobotCapteurs": SimpleNamespace(
@@ -45,15 +52,19 @@ class Materiel:
             ),
             "basic": SimpleNamespace(
                 pause=self.attendre, forever=self.boucles.append,
-                show_icon=self.icones.append, clear_screen=lambda: self.icones.append(0)
+                show_icon=self.icones.append,
+                clear_screen=lambda: self.icones.append(0)
             ),
             "input": SimpleNamespace(
                 running_time=lambda: self.temps,
                 acceleration=self.acceleration,
+                rotation=self.rotation,
+                magnetic_force=self.magnetic_force,
                 on_button_pressed=lambda bouton, rappel: self.boutons.update({bouton: rappel})
             ),
             "serial": SimpleNamespace(write_line=self.logs.append),
-            "Math": SimpleNamespace(round=lambda n: int(n + 0.5)),
+            "Math": SimpleNamespace(round=lambda n: int(n + 0.5),
+                                    atan2=math.atan2, PI=math.pi),
             "randint": lambda debut, fin: debut
         })
         self.capitaine = self.valeurs["capitaine"]
@@ -63,6 +74,16 @@ class Materiel:
 
     def acceleration(self, axe):
         return self.acceleration_x if axe == 0 else self.acceleration_z
+
+    def rotation(self, axe):
+        return self.pitch if axe == 0 else self.roll
+
+    def magnetic_force(self, axe):
+        if axe == 0:
+            return (self.force_x if self.force_x is not None else
+                    -100 * math.sin(math.radians(self.angle_magnetique)))
+        return (self.force_z if self.force_z is not None else
+                100 * math.cos(math.radians(self.angle_magnetique)))
 
     def attendre(self, millisecondes):
         self.temps += millisecondes
@@ -74,6 +95,14 @@ class Materiel:
         self.rouler()
         self.temps += 1000
         self.rouler()
+
+    def terminer_pivot(self):
+        sens = 1 if self.capitaine.sens_pivot_precedent == 2 else -1
+        for _ in range(self.capitaine.angle_vise // 20 + 1):
+            self.angle_magnetique += sens * 20
+            self.rouler()
+            if self.capitaine.etat != self.valeurs["PIVOTE"]:
+                break
 
 
 class VoyageAutonomeTest(unittest.TestCase):
@@ -112,7 +141,7 @@ class VoyageAutonomeTest(unittest.TestCase):
         self.assertEqual(robot.capitaine.eclaireur.vitesse_gauche, 110)
         self.assertEqual(robot.capitaine.eclaireur.sens_evitement, -1)
 
-    def test_evitement_deux_pivots_puis_arret(self):
+    def test_evitement_deux_pivots_magnetiques_puis_arret(self):
         robot = self.robot
         robot.poser()
         robot.distance = 5
@@ -125,8 +154,7 @@ class VoyageAutonomeTest(unittest.TestCase):
         robot.temps += 350
         robot.rouler()
         self.assertEqual(robot.capitaine.etat, robot.valeurs["PIVOTE"])
-        robot.temps = robot.capitaine.fin_etape
-        robot.rouler()
+        robot.terminer_pivot()
         self.assertEqual(robot.capitaine.etat, robot.valeurs["VERIFIE_DISTANCE"])
         for tentative in (1, 2):
             for _ in range(2):
@@ -134,8 +162,8 @@ class VoyageAutonomeTest(unittest.TestCase):
                 robot.rouler()
             if tentative == 1:
                 self.assertEqual(robot.capitaine.tentatives_pivot, 2)
-                robot.temps = robot.capitaine.fin_etape
-                robot.rouler()
+                self.assertEqual(robot.commandes[-1], ("mouvement", (2, 65, 0)))
+                robot.terminer_pivot()
         self.assertEqual(robot.capitaine.etat, robot.valeurs["ARRET_SECURITE"])
         self.assertTrue(any("obstacle persistant apres pivot" in log for log in robot.logs))
 
@@ -143,8 +171,7 @@ class VoyageAutonomeTest(unittest.TestCase):
         robot = self.robot
         robot.poser()
         robot.capitaine.ordonner_un_pivot()
-        robot.temps = robot.capitaine.fin_etape
-        robot.rouler()
+        robot.terminer_pivot()
         robot.distance = 0
         robot.temps = robot.capitaine.fin_verification
         robot.rouler()
@@ -154,8 +181,7 @@ class VoyageAutonomeTest(unittest.TestCase):
         robot = self.robot
         robot.poser()
         robot.capitaine.ordonner_un_pivot()
-        robot.temps = robot.capitaine.fin_etape
-        robot.rouler()
+        robot.terminer_pivot()
         robot.distance = 80
         for _ in range(2):
             robot.temps += 150
@@ -212,8 +238,7 @@ class VoyageAutonomeTest(unittest.TestCase):
         robot = self.robot
         robot.poser()
         robot.capitaine.ordonner_un_pivot()
-        robot.temps = robot.capitaine.fin_etape
-        robot.rouler()
+        robot.terminer_pivot()
 
         def mesure_interrompue():
             robot.capitaine.declarer_l_urgence("boutons A+B")
@@ -224,6 +249,163 @@ class VoyageAutonomeTest(unittest.TestCase):
         self.assertEqual(robot.capitaine.etat, robot.valeurs["ARRET_SECURITE"])
         self.assertEqual(robot.capitaine.eclaireur.lectures_libres, 0)
         self.assertFalse(any("Apres pivot" in log for log in robot.logs))
+
+    def test_pivot_arrete_sur_angle_magnetique_sans_calibration(self):
+        robot = self.robot
+        robot.poser()
+        robot.capitaine.ordonner_un_pivot()
+        self.assertEqual(robot.capitaine.angle_vise, 100)
+        self.assertEqual(robot.commandes[-1], ("mouvement", (2, 65, 0)))
+        # Une mesure par pas, sans saut magnetique excessif.
+        for angle in (20, 40, 60, 80):
+            robot.angle_magnetique = angle
+            robot.rouler()
+        self.assertAlmostEqual(robot.capitaine.angle_parcouru, 80, delta=1)
+        robot.temps += 100
+        robot.rouler()
+        self.assertEqual(robot.capitaine.etat, robot.valeurs["PIVOTE"])
+        robot.angle_magnetique = 100
+        robot.rouler()
+        self.assertEqual(robot.capitaine.etat, robot.valeurs["VERIFIE_DISTANCE"])
+        self.assertEqual(robot.commandes[-1], ("mouvement", (0,)))
+
+    def test_pivot_immobile_declenche_la_securite(self):
+        robot = self.robot
+        robot.poser()
+        robot.capitaine.ordonner_un_pivot()
+        robot.temps += robot.valeurs["MS_SANS_ROTATION"]
+        robot.rouler()
+        self.assertEqual(robot.capitaine.etat, robot.valeurs["ARRET_SECURITE"])
+        self.assertEqual(robot.commandes[-1], ("mouvement", (0,)))
+
+    def test_pivot_trop_long_malgre_progres_declenche_la_securite(self):
+        robot = self.robot
+        robot.poser()
+        robot.capitaine.ordonner_un_pivot()
+        for _ in range(5):
+            robot.temps += 400
+            robot.angle_magnetique += 5
+            robot.rouler()
+            self.assertEqual(robot.capitaine.etat, robot.valeurs["PIVOTE"])
+        robot.temps = robot.capitaine.debut_pivot + robot.valeurs["MS_PIVOT_MAX"]
+        robot.rouler()
+        self.assertEqual(robot.capitaine.etat, robot.valeurs["ARRET_SECURITE"])
+        self.assertEqual(robot.commandes[-1], ("mouvement", (0,)))
+
+    def test_champ_deforme_ou_saut_magnetique_declenche_la_securite(self):
+        for champ_x, champ_z in ((0, 0), (100, 100), (-100, 0)):
+            with self.subTest(champ=(champ_x, champ_z)):
+                robot = Materiel()
+                robot.poser()
+                robot.capitaine.ordonner_un_pivot()
+                robot.force_x = champ_x
+                robot.force_z = champ_z
+                robot.rouler()
+                self.assertEqual(robot.capitaine.etat, robot.valeurs["ARRET_SECURITE"])
+
+    def test_champ_nul_avant_pivot_interdit_les_moteurs(self):
+        robot = self.robot
+        robot.poser()
+        robot.force_x = robot.force_z = 0
+        robot.capitaine.ordonner_un_pivot()
+        self.assertEqual(robot.capitaine.etat, robot.valeurs["ARRET_SECURITE"])
+        self.assertEqual(robot.commandes[-1], ("mouvement", (0,)))
+
+    def test_urgence_pendant_lecture_magnetique_interdit_le_pivot(self):
+        robot = self.robot
+        robot.poser()
+        def lecture_interrompue(axe):
+            robot.capitaine.declarer_l_urgence("boutons A+B")
+            return 100
+
+        robot.valeurs["input"].magnetic_force = lecture_interrompue
+        robot.capitaine.ordonner_un_pivot()
+        self.assertEqual(robot.capitaine.etat, robot.valeurs["ARRET_SECURITE"])
+        self.assertEqual(robot.commandes[-1], ("mouvement", (0,)))
+
+    def test_urgence_pendant_suivi_magnetique_coupe_les_moteurs(self):
+        robot = self.robot
+        robot.poser()
+        robot.capitaine.ordonner_un_pivot()
+
+        def lecture_interrompue(axe):
+            robot.capitaine.declarer_l_urgence("boutons A+B")
+            return 100
+
+        robot.valeurs["input"].magnetic_force = lecture_interrompue
+        robot.rouler()
+        self.assertEqual(robot.capitaine.etat, robot.valeurs["ARRET_SECURITE"])
+        self.assertEqual(robot.commandes[-1], ("mouvement", (0,)))
+
+    def test_pivot_antihoraire_et_retour_en_arriere(self):
+        robot = self.robot
+        robot.poser()
+        robot.capitaine.ordonner_un_pivot()
+        robot.capitaine.sens_pivot_precedent = 3
+        robot.angle_magnetique = -20
+        robot.rouler()
+        robot.angle_magnetique = -10
+        robot.rouler()
+        self.assertAlmostEqual(robot.capitaine.angle_parcouru, 10, delta=1)
+        for angle in (-30, -50, -70, -90, -110):
+            robot.angle_magnetique = angle
+            robot.rouler()
+        self.assertEqual(robot.capitaine.etat, robot.valeurs["VERIFIE_DISTANCE"])
+
+    def test_basculement_pitch_ou_roll_suspend_et_attend_le_redressement(self):
+        for axe in ("pitch", "roll"):
+            with self.subTest(axe=axe):
+                robot = Materiel()
+                robot.poser()
+                setattr(robot, axe, getattr(robot, axe) + 35)
+                robot.rouler()
+                self.assertFalse(robot.capitaine.sentinelle.hors_sol)
+                robot.temps += robot.valeurs["MS_INCLINAISON"]
+                robot.rouler()
+                self.assertTrue(robot.capitaine.sentinelle.hors_sol)
+                self.assertEqual(robot.commandes[-1], ("mouvement", (0,)))
+                robot.temps += 1200
+                robot.rouler()
+                self.assertTrue(robot.capitaine.sentinelle.hors_sol)
+                setattr(robot, axe, 90 if axe == "pitch" else 0)
+                robot.rouler()
+                robot.temps += robot.valeurs["MS_BLANC"]
+                robot.rouler()
+                self.assertFalse(robot.capitaine.sentinelle.hors_sol)
+
+    def test_petit_basculement_et_secousse_breve_ignores(self):
+        robot = self.robot
+        robot.poser()
+        robot.roll = 25
+        robot.temps += 300
+        robot.rouler()
+        self.assertFalse(robot.capitaine.sentinelle.hors_sol)
+        robot.roll = 35
+        robot.rouler()
+        robot.roll = 0
+        robot.temps += 200
+        robot.rouler()
+        self.assertFalse(robot.capitaine.sentinelle.hors_sol)
+
+    def test_rotation_a_180_degres_ne_declenche_pas_de_faux_basculement(self):
+        robot = self.robot
+        robot.pitch = 179
+        robot.poser()
+        robot.pitch = -179
+        robot.temps += 300
+        robot.rouler()
+        self.assertFalse(robot.capitaine.sentinelle.hors_sol)
+
+    def test_basculement_pendant_pivot_arrete_les_moteurs(self):
+        robot = self.robot
+        robot.poser()
+        robot.capitaine.ordonner_un_pivot()
+        robot.roll = -35
+        robot.rouler()
+        robot.temps += robot.valeurs["MS_INCLINAISON"]
+        robot.rouler()
+        self.assertTrue(robot.capitaine.sentinelle.hors_sol)
+        self.assertEqual(robot.commandes[-1], ("mouvement", (0,)))
 
     def test_choc_confirme_apres_deux_mesures(self):
         robot = self.robot
