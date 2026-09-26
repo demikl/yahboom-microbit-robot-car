@@ -2,7 +2,8 @@
     "name": "yahboom-microbit-robot-car",
     "description": "Interact with the Yahboom Microbit Robot Car motors, lights and sensors",
     "dependencies": {
-        "core": "*"
+        "core": "*",
+        "neopixel": "github:microsoft/pxt-neopixel"
     },
     "files": [
         "main.blocks",
