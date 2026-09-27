@@ -26,7 +26,9 @@ MS_SANS_ROTATION = 500          # Arret si aucune rotation magnetique mesuree.
 SEUIL_CHOC = 900                 # Valeur a depasser deux fois pour confirmer.
 ACTIVER_CHOC_LATERAL = False     # False : observer X sans reagir aux chocs de cote.
 SENS_FREINAGE_Z = 1             # Inverser en -1 si le freinage pointe vers -Z.
-SEUIL_INCLINAISON = 30          # Ecart en degres sur pitch ou roll.
+SEUIL_INCLINAISON = 30          # Ecart en degres entre deux directions de gravite.
+GRAVITE_MIN = 800              # Ne pas croire la pose lors d'une forte secousse.
+GRAVITE_MAX = 1200             # Norme attendue : environ 1000 milli-g.
 MS_INCLINAISON = 200            # Eviter qu'une breve secousse suspende le robot.
 MS_PIVOT_MAX = 3000            # Limite de securite du pivot mesure.
 
@@ -80,6 +82,17 @@ class SentinelleDuSol:
         self.incline = False            # Le robot a bascule depuis sa pose initiale.
         self.pitch_initial = None       # Pose de reference au premier controle du sol.
         self.roll_initial = None
+        self.gravite_x = None           # Direction X/Y/Z au repos.
+        self.gravite_y = 0
+        self.gravite_z = 0
+        self.norme_initiale = 0
+        self.pitch = 0                  # Derniere pose mesuree pour le diagnostic.
+        self.roll = 0
+        self.ecart_pitch = 0
+        self.ecart_roll = 0
+        self.ecart_inclinaison = 0
+        self.mesure_stable = False
+        self.gravite_mg = 0
         self.ligne_gauche_noire = False  # Derniere couleur vue a gauche.
         self.ligne_droite_noire = False  # Derniere couleur vue a droite.
 
@@ -88,23 +101,44 @@ class SentinelleDuSol:
         # Retour : -1 = souleve, 1 = repose, 0 = aucun changement.
         self.ligne_gauche_noire = RobotCapteurs.line_is_black(MotorSide.LEFT)
         self.ligne_droite_noire = RobotCapteurs.line_is_black(MotorSide.RIGHT)
-        pitch = input.rotation(Rotation.PITCH)
-        roll = input.rotation(Rotation.ROLL)
-        if self.pitch_initial is None:
-            self.pitch_initial = pitch
-            self.roll_initial = roll
-        # L'ecart circulaire evite un faux basculement au passage de 180 a -180.
-        ecart_pitch = abs((pitch - self.pitch_initial + 180) % 360 - 180)
-        ecart_roll = abs((roll - self.roll_initial + 180) % 360 - 180)
-        penche = ecart_pitch >= SEUIL_INCLINAISON or ecart_roll >= SEUIL_INCLINAISON
+        self.pitch = input.rotation(Rotation.PITCH)
+        self.roll = input.rotation(Rotation.ROLL)
+        x = input.acceleration(Dimension.X)
+        y = input.acceleration(Dimension.Y)
+        z = input.acceleration(Dimension.Z)
+        norme = x * x + y * y + z * z
+        self.gravite_mg = Math.round(Math.sqrt(norme))
+        self.mesure_stable = GRAVITE_MIN * GRAVITE_MIN <= norme <= GRAVITE_MAX * GRAVITE_MAX
+        if self.gravite_x is None and self.mesure_stable:
+            self.gravite_x = x
+            self.gravite_y = y
+            self.gravite_z = z
+            self.norme_initiale = norme
+            self.pitch_initial = self.pitch
+            self.roll_initial = self.roll
+        if self.gravite_x is not None:
+            # abs avant % : MakeCode peut garder un reste negatif.
+            difference_pitch = abs(self.pitch - self.pitch_initial) % 360
+            difference_roll = abs(self.roll - self.roll_initial) % 360
+            self.ecart_pitch = min(difference_pitch, 360 - difference_pitch)
+            self.ecart_roll = min(difference_roll, 360 - difference_roll)
+        penche = False
+        if self.mesure_stable and self.gravite_x is not None:
+            produit = x * self.gravite_x + y * self.gravite_y + z * self.gravite_z
+            surface = norme * self.norme_initiale
+            self.ecart_inclinaison = (Math.atan2(Math.sqrt(max(0, surface - produit * produit)),
+                                                 produit) * 180 / Math.PI)
+            penche = self.ecart_inclinaison >= SEUIL_INCLINAISON
         if penche:
             if self.debut_inclinaison < 0:
                 self.debut_inclinaison = maintenant
             if maintenant - self.debut_inclinaison >= MS_INCLINAISON:
                 self.incline = True
-        else:
+        elif self.mesure_stable:
             self.debut_inclinaison = -1
             self.incline = False
+        else:
+            self.debut_inclinaison = -1
 
         if self.incline:
             self.debut_blanc = -1
@@ -127,7 +161,8 @@ class SentinelleDuSol:
 
         if self.hors_sol:
             # Pour repartir, les DEUX capteurs doivent voir du blanc et le robot etre droit.
-            if not self.ligne_gauche_noire and not self.ligne_droite_noire and not penche:
+            if (self.mesure_stable and self.gravite_x is not None and
+                not self.ligne_gauche_noire and not self.ligne_droite_noire and not penche):
                 if self.debut_blanc < 0:
                     self.debut_blanc = maintenant
                 if maintenant - self.debut_blanc >= MS_BLANC:
@@ -137,6 +172,16 @@ class SentinelleDuSol:
             else:
                 self.debut_blanc = -1
         return 0
+
+    def decrire_la_pose(self):
+        return (" pitch=" + str(self.pitch) + " roll=" + str(self.roll) +
+                " refPitch=" + str(self.pitch_initial) +
+                " refRoll=" + str(self.roll_initial) +
+                " ecartPitch=" + str(self.ecart_pitch) +
+                " ecartRoll=" + str(self.ecart_roll) +
+                " ecartInclinaison=" + str(Math.round(self.ecart_inclinaison)) +
+                " graviteMg=" + str(self.gravite_mg) +
+                " graviteStable=" + ("true" if self.mesure_stable else "false"))
 
 
 class VigieDesChocs:
@@ -647,7 +692,8 @@ class CapitaineDuVoyage:
         droite = "noir" if self.sentinelle.ligne_droite_noire else "blanc"  # Capteur droit.
         # La pause espace les rapports : une fois par seconde, meme a l'arret.
         serial.write_line("Etat : " + nom + " horsSol=" + sol +
-                          " ligneG=" + gauche + " ligneD=" + droite)
+                          " ligneG=" + gauche + " ligneD=" + droite +
+                          self.sentinelle.decrire_la_pose())
         basic.pause(1000)
 
     def mener_une_etape(self):
@@ -670,7 +716,11 @@ class CapitaineDuVoyage:
             self.mecanicien.immobiliser()
             self.signaleur.agiter_les_signaux(True, self.etat, self.eclaireur.sens_evitement)
             self.signaleur.montrer_la_suspension()
-            serial.write_line("Suspendu : capteurs noirs ou inclinaison")
+            if self.sentinelle.incline:
+                serial.write_line("Suspendu : inclinaison" +
+                                  self.sentinelle.decrire_la_pose())
+            else:
+                serial.write_line("Suspendu : deux capteurs noirs")
 
         if self.sentinelle.hors_sol:
             # Tant que les deux blancs ne sont pas confirmes, ne pas avancer.

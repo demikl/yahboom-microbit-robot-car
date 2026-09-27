@@ -15,6 +15,7 @@ class Materiel:
         self.noir_droit = False
         self.distance = 100
         self.acceleration_x = 0
+        self.acceleration_y = 1000
         self.acceleration_z = 0
         self.pitch = 90
         self.roll = 0
@@ -33,7 +34,7 @@ class Materiel:
             "MovementDirection": SimpleNamespace(
                 STOP=0, BACKWARD=1, CLOCKWISE=2, COUNTER_CLOCKWISE=3
             ),
-            "Dimension": SimpleNamespace(X=0, Z=2),
+            "Dimension": SimpleNamespace(X=0, Y=1, Z=2),
             "Rotation": SimpleNamespace(PITCH=0, ROLL=1),
             "Button": SimpleNamespace(AB=3),
             "IconNames": SimpleNamespace(COW=1, NO=2),
@@ -64,7 +65,7 @@ class Materiel:
             ),
             "serial": SimpleNamespace(write_line=self.logs.append),
             "Math": SimpleNamespace(round=lambda n: int(n + 0.5),
-                                    atan2=math.atan2, PI=math.pi),
+                                    atan2=math.atan2, sqrt=math.sqrt, PI=math.pi),
             "randint": lambda debut, fin: debut
         })
         self.capitaine = self.valeurs["capitaine"]
@@ -73,7 +74,9 @@ class Materiel:
         return self.noir_gauche if cote == 0 else self.noir_droit
 
     def acceleration(self, axe):
-        return self.acceleration_x if axe == 0 else self.acceleration_z
+        if axe == 0:
+            return self.acceleration_x
+        return self.acceleration_y if axe == 1 else self.acceleration_z
 
     def rotation(self, axe):
         return self.pitch if axe == 0 else self.roll
@@ -229,17 +232,47 @@ class VoyageAutonomeTest(unittest.TestCase):
         robot.poser()
         self.assertEqual(robot.capitaine.signaleur.diagnostic, 0)
         robot.roll = 35
+        robot.acceleration_x = 600
+        robot.acceleration_y = 800
         robot.rouler()
         robot.temps += robot.valeurs["MS_INCLINAISON"]
         robot.rouler()
         self.assertDiagnostic(robot, 0x00FFFF)
         robot.roll = 0
+        robot.acceleration_x = 0
+        robot.acceleration_y = 1000
         robot.rouler()
         self.assertDiagnostic(robot, 0x00FFFF)
         robot.temps += robot.valeurs["MS_BLANC"]
         robot.rouler()
         self.assertEqual(robot.capitaine.signaleur.diagnostic, 0)
         self.assertIn(("pixel_on", (2, 0)), robot.signaux)
+
+    def test_journal_distingue_sol_et_inclinaison_avec_pose_mesuree(self):
+        robot = self.robot
+        robot.poser()
+        robot.noir_gauche = robot.noir_droit = True
+        robot.rouler()
+        robot.temps += robot.valeurs["MS_NOIR"]
+        robot.rouler()
+        self.assertEqual(robot.logs[-1], "Suspendu : deux capteurs noirs")
+        robot.noir_gauche = robot.noir_droit = False
+        robot.rouler()
+        robot.temps += robot.valeurs["MS_BLANC"]
+        robot.rouler()
+        robot.roll = 35
+        robot.acceleration_x = 600
+        robot.acceleration_y = 800
+        robot.rouler()
+        robot.temps += robot.valeurs["MS_INCLINAISON"]
+        robot.rouler()
+        self.assertEqual(robot.logs[-1], "Suspendu : inclinaison pitch=90 roll=35 "
+                         "refPitch=90 refRoll=0 ecartPitch=0 ecartRoll=35 "
+                         "ecartInclinaison=37 graviteMg=1000 graviteStable=true")
+        robot.valeurs["boucle_du_rapport"]()
+        self.assertIn("horsSol=true ligneG=blanc ligneD=blanc pitch=90 roll=35 "
+                      "refPitch=90 refRoll=0 ecartPitch=0 ecartRoll=35 "
+                      "ecartInclinaison=37 graviteMg=1000 graviteStable=true", robot.logs[-1])
 
     def test_diagnostic_obstacle_et_magnetometre_reste_apres_arret(self):
         robot = self.robot
@@ -445,6 +478,8 @@ class VoyageAutonomeTest(unittest.TestCase):
                 robot = Materiel()
                 robot.poser()
                 setattr(robot, axe, getattr(robot, axe) + 35)
+                robot.acceleration_x = 600
+                robot.acceleration_y = 800
                 robot.rouler()
                 self.assertFalse(robot.capitaine.sentinelle.hors_sol)
                 robot.temps += robot.valeurs["MS_INCLINAISON"]
@@ -455,6 +490,8 @@ class VoyageAutonomeTest(unittest.TestCase):
                 robot.rouler()
                 self.assertTrue(robot.capitaine.sentinelle.hors_sol)
                 setattr(robot, axe, 90 if axe == "pitch" else 0)
+                robot.acceleration_x = 0
+                robot.acceleration_y = 1000
                 robot.rouler()
                 robot.temps += robot.valeurs["MS_BLANC"]
                 robot.rouler()
@@ -474,6 +511,64 @@ class VoyageAutonomeTest(unittest.TestCase):
         robot.rouler()
         self.assertFalse(robot.capitaine.sentinelle.hors_sol)
 
+    def test_angles_instables_en_position_verticale_ne_suspendent_pas(self):
+        robot = self.robot
+        robot.pitch = 96
+        robot.roll = 164
+        robot.poser()
+        for pitch, roll in ((47, 38), (70, 45), (-19, 55), (98, -154)):
+            robot.pitch = pitch
+            robot.roll = roll
+            robot.temps += robot.valeurs["MS_INCLINAISON"]
+            robot.rouler()
+            self.assertFalse(robot.capitaine.sentinelle.hors_sol)
+        self.assertEqual(robot.capitaine.sentinelle.ecart_roll, 42)
+        self.assertEqual(robot.capitaine.sentinelle.ecart_inclinaison, 0)
+        self.assertFalse(any("Suspendu : inclinaison" in log for log in robot.logs))
+
+    def test_secousse_ne_confirme_pas_un_basculement(self):
+        robot = self.robot
+        robot.poser()
+        robot.acceleration_x = 600
+        robot.acceleration_y = 800
+        robot.rouler()
+        robot.acceleration_x = 1400
+        robot.acceleration_y = 800
+        robot.temps += robot.valeurs["MS_INCLINAISON"]
+        robot.rouler()
+        self.assertFalse(robot.capitaine.sentinelle.mesure_stable)
+        self.assertFalse(robot.capitaine.sentinelle.hors_sol)
+        robot.acceleration_x = 600
+        robot.acceleration_y = 800
+        robot.rouler()
+        self.assertFalse(robot.capitaine.sentinelle.hors_sol)
+        robot.temps += robot.valeurs["MS_INCLINAISON"]
+        robot.rouler()
+        self.assertTrue(robot.capitaine.sentinelle.hors_sol)
+
+    def test_attend_une_mesure_stable_avant_le_premier_depart(self):
+        robot = self.robot
+        robot.acceleration_y = 1500
+        robot.poser()
+        self.assertTrue(robot.capitaine.sentinelle.hors_sol)
+        self.assertIsNone(robot.capitaine.sentinelle.gravite_x)
+        robot.acceleration_y = 1000
+        robot.rouler()
+        robot.temps += robot.valeurs["MS_BLANC"]
+        robot.rouler()
+        self.assertFalse(robot.capitaine.sentinelle.hors_sol)
+
+    def test_capteurs_noirs_suspendent_meme_si_gravite_instable(self):
+        robot = self.robot
+        robot.poser()
+        robot.acceleration_y = 1500
+        robot.noir_gauche = robot.noir_droit = True
+        robot.rouler()
+        robot.temps += robot.valeurs["MS_NOIR"]
+        robot.rouler()
+        self.assertTrue(robot.capitaine.sentinelle.hors_sol)
+        self.assertEqual(robot.logs[-1], "Suspendu : deux capteurs noirs")
+
     def test_rotation_a_180_degres_ne_declenche_pas_de_faux_basculement(self):
         robot = self.robot
         robot.pitch = 179
@@ -488,6 +583,8 @@ class VoyageAutonomeTest(unittest.TestCase):
         robot.poser()
         robot.capitaine.ordonner_un_pivot()
         robot.roll = -35
+        robot.acceleration_x = 600
+        robot.acceleration_y = 800
         robot.rouler()
         robot.temps += robot.valeurs["MS_INCLINAISON"]
         robot.rouler()
