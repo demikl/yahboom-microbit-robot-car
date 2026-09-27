@@ -32,6 +32,24 @@ La [version Python MakeCode sans boussole calibrée](examples/voyage-autonome-sa
 
 La mesure magnétique brute est **expérimentale** : les moteurs, les pièces métalliques et les aimants environnants peuvent modifier la direction du champ sans rotation réelle. Ni un angle affiché ni la stabilité de la norme ne prouvent absolument que le robot a tourné ; essayez-le d'abord roues décollées du sol et vérifiez la cohérence de la mesure sur le robot réel. Si le champ est perturbé, arrêtez l'essai : il faut un encodeur de roue ou un gyroscope pour une confirmation fiable sans boussole calibrée. La suspension par basculement utilise `input.rotation(Rotation.PITCH)` et `input.rotation(Rotation.ROLL)` en complément des deux capteurs de ligne. La pose initiale est relevée automatiquement au premier contrôle : posez le robot droit avant le départ. Un écart d'au moins 30° sur l'un des deux axes pendant 200 ms arrête les moteurs ; la reprise automatique exige que les deux capteurs voient du blanc **et** que le robot retrouve sa pose initiale pendant une seconde. Ces deux angles mesurent l'inclinaison par rapport à la gravité, pas le lacet d'un pivot sur le sol. Chaque personnage expose des méthodes en français sans accents. A+B impose un arrêt définitif jusqu'au bouton Reset.
 
+### Le pixel 2 mène l'enquête
+
+Sur cette version Python, le **NeoPixel central (n° 2)** révèle pourquoi le robot s'est arrêté :
+
+| Voyant | Couleur | Ce que le robot a détecté |
+|:---:|---|---|
+| 🩵 | Cyan | **Inclinaison** : le robot a basculé par rapport à sa pose initiale. |
+| 🔵 | Bleu | **Sol** : les deux capteurs de ligne voient du noir. |
+| 🔴 | Rouge | **Choc** confirmé par l'accéléromètre. |
+| 🟠 | Orange | **Obstacle proche** détecté par l'ultrason. |
+| 🟣 | Violet | **Magnétomètre** : champ nul ou instable, saut magnétique ou absence de rotation magnétique détectée. |
+| 🟡 | Jaune | **Distance incertaine** ou obstacle toujours présent après les pivots. |
+| 🩷 | Rose | **Pivot trop long** : délai maximal dépassé. |
+| ⚪ | Blanc | **Arrêt manuel** par les boutons A+B. |
+| ⚫ | Éteint | **Trajet normal**, sans arrêt à signaler. |
+
+Le pixel 2 reste allumé pendant la suspension ou l'évitement (même quand les clignotants latéraux s'éteignent), puis s'éteint à la reprise ; pour un arrêt de sécurité, la couleur reste affichée jusqu'au Reset. Les pixels 1 et 3 conservent leurs clignotants orange. **Violet ne signifie pas que le magnétomètre est défectueux** : il indique la condition logicielle qui a déclenché l'arrêt. Le message `ARRET SECURITE` du moniteur série en donne le motif précis.
+
 Les commentaires de ce fichier s'adressent aux débutants venant de la programmation par blocs : commencez par les repères Python et les réglages en tête de fichier, puis suivez les personnages jusqu'aux trois boucles `basic.forever` à la fin. Chaque variable importante, chaque méthode et les décisions de sécurité sont expliquées sur place ; les commentaires ne changent pas le comportement du robot.
 
 ### Apprendre progressivement

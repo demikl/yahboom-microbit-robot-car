@@ -48,6 +48,16 @@ MS_CLIGNOTANT = 400            # Duree de la phase allumee (puis 400 ms eteinte)
 COULEUR_CLIGNOTANT = 0xFF8000  # Rouge + vert en notation hexadecimale = orange.
 PIXEL_GAUCHE = 3               # Numero du NeoPixel sur le cote gauche.
 PIXEL_DROIT = 1                # Numero du NeoPixel sur le cote droit.
+PIXEL_DIAGNOSTIC = 2           # Reste allume pour montrer la cause de l'arret.
+DIAG_AUCUN = 0x000000          # Eteint : trajet normal.
+DIAG_INCLINAISON = 0x00FFFF    # Cyan : robot penche.
+DIAG_SOL = 0x0000FF            # Bleu : deux capteurs de ligne noirs.
+DIAG_CHOC = 0xFF0000           # Rouge : choc confirme.
+DIAG_OBSTACLE = 0xFF8000       # Orange : obstacle proche.
+DIAG_MAGNETIQUE = 0x8000FF     # Violet : mesure magnetique invalide.
+DIAG_DISTANCE = 0xFFFF00       # Jaune : verification ultrason echouee.
+DIAG_PIVOT = 0xFF0080          # Rose : delai maximal du pivot depasse.
+DIAG_BOUTONS = 0xFFFFFF        # Blanc : arret demande par A+B.
 MESURES_CONFIRMATION = 2       # Deux lectures coherentes avant de decider.
 
 # Les nombres suivants sont des etiquettes pour les etapes du voyage.
@@ -416,6 +426,12 @@ class SignaleurDesLumieres:
         self.signal_allume = False        # Phase allumee ou eteinte du clignotement.
         self.debut_clignotement = 0       # Heure du dernier changement de mode.
         self.fleche_hors_sol_affichee = False  # Evite de redessiner la vache sans cesse.
+        self.diagnostic = DIAG_AUCUN
+
+    def definir_le_diagnostic(self, couleur):
+        if couleur != self.diagnostic:
+            self.diagnostic = couleur
+            RobotAfficheurs.pixel_on(PIXEL_DIAGNOSTIC, couleur)
 
     def montrer_la_suspension(self):
         # La vache est le dessin choisi pour dire "robot souleve".
@@ -453,6 +469,8 @@ class SignaleurDesLumieres:
             return
         # On efface avant de rallumer uniquement les pixels utiles.
         RobotAfficheurs.pixels_off()
+        if self.diagnostic != DIAG_AUCUN:
+            RobotAfficheurs.pixel_on(PIXEL_DIAGNOSTIC, self.diagnostic)
         if allume:
             if mode == -1 or mode == 2:
                 RobotAfficheurs.pixel_on(PIXEL_GAUCHE, COULEUR_CLIGNOTANT)
@@ -492,18 +510,21 @@ class CapitaineDuVoyage:
         # "or" signifie qu'une SEULE des deux conditions suffit pour stopper.
         return self.etat == ARRET_SECURITE or self.sentinelle.hors_sol
 
-    def declarer_l_urgence(self, message):
+    def declarer_l_urgence(self, message, diagnostic):
         # message indique pourquoi on s'arrete : "boutons A+B" ou une route
         # incertaine apres pivot. STOP definitif jusqu'au bouton Reset.
+        if self.etat == ARRET_SECURITE:
+            return
         self.etat = ARRET_SECURITE
         self.vigie.oublier_le_choc()
         self.mecanicien.immobiliser()
+        self.signaleur.definir_le_diagnostic(diagnostic)
         self.signaleur.agiter_les_signaux(self.sentinelle.hors_sol, self.etat,
                                           self.eclaireur.sens_evitement)
         serial.write_line("ARRET SECURITE : " + message)
         self.signaleur.marquer_l_urgence()
 
-    def lancer_l_evitement(self, raison):
+    def lancer_l_evitement(self, raison, diagnostic):
         # raison est le texte "Choc" ou "Obstacle proche" pour le journal.
         # Programme une PAUSE sans bloquer le reste du robot avec un long delai.
         self.mecanicien.immobiliser()
@@ -513,6 +534,7 @@ class CapitaineDuVoyage:
         self.tentatives_pivot = 0
         self.etat = PAUSE_CHOC
         self.fin_etape = input.running_time() + MS_PAUSE_CHOC
+        self.signaleur.definir_le_diagnostic(diagnostic)
         serial.write_line(raison + " : arret, recul, puis pivot")
 
     def ordonner_un_pivot(self, reessai=False):
@@ -526,7 +548,7 @@ class CapitaineDuVoyage:
             return
         norme = x * x + z * z
         if norme == 0:
-            self.declarer_l_urgence("champ magnetique horizontal nul")
+            self.declarer_l_urgence("champ magnetique horizontal nul", DIAG_MAGNETIQUE)
             return
         self.angle_vise = randint(100, 170)
         if not reessai:
@@ -554,7 +576,7 @@ class CapitaineDuVoyage:
     def suivre_le_pivot(self, maintenant):
         # Le delai prime sur la lecture : ne jamais prolonger un pivot bloque.
         if maintenant - self.debut_pivot >= MS_PIVOT_MAX:
-            self.declarer_l_urgence("pivot non confirme dans le delai maximal")
+            self.declarer_l_urgence("pivot non confirme dans le delai maximal", DIAG_PIVOT)
             return
         x = input.magnetic_force(Dimension.X)
         z = input.magnetic_force(Dimension.Z)
@@ -564,7 +586,7 @@ class CapitaineDuVoyage:
         norme = x * x + z * z
         if (norme == 0 or
             abs(norme - self.norme_champ) * 100 > VARIATION_CHAMP_MAX * self.norme_champ):
-            self.declarer_l_urgence("champ magnetique instable pendant le pivot")
+            self.declarer_l_urgence("champ magnetique instable pendant le pivot", DIAG_MAGNETIQUE)
             return
         # atan2 du produit vectoriel et scalaire donne un pas signe sur X/Z.
         # Vu de dessus, le champ tourne dans le sens oppose au robot.
@@ -574,7 +596,7 @@ class CapitaineDuVoyage:
         if self.sens_pivot_precedent == MovementDirection.COUNTER_CLOCKWISE:
             pas = -pas
         if abs(pas) > PAS_MAGNETIQUE_MAX:
-            self.declarer_l_urgence("saut magnetique pendant le pivot")
+            self.declarer_l_urgence("saut magnetique pendant le pivot", DIAG_MAGNETIQUE)
             return
         self.angle_parcouru = max(0, self.angle_parcouru + pas)
         self.champ_x = x
@@ -591,13 +613,14 @@ class CapitaineDuVoyage:
             serial.write_line("Pivot magnetique : " + str(Math.round(self.angle_parcouru)) +
                               " degres, verification ultrason")
         elif input.running_time() - self.dernier_progres >= MS_SANS_ROTATION:
-            self.declarer_l_urgence("pivot sans rotation magnetique")
+            self.declarer_l_urgence("pivot sans rotation magnetique", DIAG_MAGNETIQUE)
 
     def reprendre_la_marche(self):
         # Repart apres une suspension ou une voie libre CONFIRMEE apres pivot.
         if self.interruption_demandee():
             return
         self.etat = AVANCE
+        self.signaleur.definir_le_diagnostic(DIAG_AUCUN)
         self.tentatives_pivot = 0
         self.vigie.oublier_le_choc()
         self.eclaireur.reprendre_la_route()
@@ -636,6 +659,11 @@ class CapitaineDuVoyage:
 
         maintenant = input.running_time()  # Heure utilisee pour les delais.
         changement_sol = self.sentinelle.inspecter_le_sol(maintenant)  # -1, 0 ou 1.
+        if self.sentinelle.hors_sol:
+            if self.sentinelle.incline:
+                self.signaleur.definir_le_diagnostic(DIAG_INCLINAISON)
+            elif self.sentinelle.ligne_gauche_noire and self.sentinelle.ligne_droite_noire:
+                self.signaleur.definir_le_diagnostic(DIAG_SOL)
         if changement_sol == -1:
             # Sol ou inclinaison suspects : STOP et dessin de la vache.
             self.vigie.oublier_le_choc()
@@ -692,16 +720,17 @@ class CapitaineDuVoyage:
                         serial.write_line("Obstacle persistant : nouveau pivot magnetique")
                         self.ordonner_un_pivot(True)
                     else:
-                        self.declarer_l_urgence("obstacle persistant apres pivot de secours")
+                        self.declarer_l_urgence("obstacle persistant apres pivot de secours",
+                                                 DIAG_DISTANCE)
                 elif input.running_time() >= self.fin_verification:
                     # Trop de mesures 0 ou contradictoires : arret prudent.
-                    self.declarer_l_urgence("distance non confirmee apres pivot")
+                    self.declarer_l_urgence("distance non confirmee apres pivot", DIAG_DISTANCE)
             elif maintenant >= self.fin_verification:
-                self.declarer_l_urgence("distance non confirmee apres pivot")
+                self.declarer_l_urgence("distance non confirmee apres pivot", DIAG_DISTANCE)
         else:
             # Pendant AVANCE, un choc passe avant la detection ultrason.
             if self.vigie.choc_detecte:
-                self.lancer_l_evitement("Choc")
+                self.lancer_l_evitement("Choc", DIAG_CHOC)
             else:
                 nouvelle_mesure = self.eclaireur.scruter_la_route(maintenant)
                 if self.interruption_demandee():
@@ -710,7 +739,7 @@ class CapitaineDuVoyage:
                 if nouvelle_mesure:
                     self.eclaireur.raconter_la_route()
                 if 0 < self.eclaireur.distance <= DISTANCE_OBSTACLE:
-                    self.lancer_l_evitement("Obstacle proche")
+                    self.lancer_l_evitement("Obstacle proche", DIAG_OBSTACLE)
                 else:
                     # L'eclaireur propose, le mecanicien actionne les roues.
                     self.eclaireur.calculer_l_allure(input.running_time())
@@ -736,7 +765,7 @@ capitaine = CapitaineDuVoyage()
 
 def bouton_urgence():
     # Fonction appelee automatiquement quand on presse A+B.
-    capitaine.declarer_l_urgence("boutons A+B")
+    capitaine.declarer_l_urgence("boutons A+B", DIAG_BOUTONS)
 
 
 def boucle_des_chocs():

@@ -109,6 +109,18 @@ class VoyageAutonomeTest(unittest.TestCase):
     def setUp(self):
         self.robot = Materiel()
 
+    def assertDiagnostic(self, robot, couleur):
+        self.assertEqual(robot.capitaine.signaleur.diagnostic, couleur)
+        dernier_effacement = max(
+            (index for index, signal in enumerate(robot.signaux)
+             if signal[0] == "pixels_off"), default=-1
+        )
+        self.assertEqual(
+            [signal for signal in robot.signaux[dernier_effacement + 1:]
+             if signal[0] == "pixel_on" and signal[1][0] == 2][-1],
+            ("pixel_on", (2, couleur))
+        )
+
     def test_reprise_suspension_et_arret_definitif(self):
         robot = self.robot
         robot.poser()
@@ -196,12 +208,84 @@ class VoyageAutonomeTest(unittest.TestCase):
         robot.temps += 150
         robot.rouler()
         self.assertIn(("pixel_on", (3, 0xFF8000)), robot.signaux)
-        robot.capitaine.lancer_l_evitement("Choc")
+        robot.capitaine.lancer_l_evitement("Choc", robot.valeurs["DIAG_CHOC"])
         robot.rouler()
         self.assertIn(("pixel_on", (1, 0xFF8000)), robot.signaux)
         self.assertIn(("rgb_on", (0xFF8000,)), robot.signaux)
-        robot.capitaine.declarer_l_urgence("boutons A+B")
+        self.assertDiagnostic(robot, 0xFF0000)
+        robot.temps += robot.valeurs["MS_CLIGNOTANT"]
+        robot.rouler()
+        self.assertDiagnostic(robot, 0xFF0000)
+        robot.boutons[3]()
+        self.assertDiagnostic(robot, 0xFFFFFF)
         self.assertEqual(robot.signaux[-1], ("rgb_off",))
+
+    def test_diagnostic_sol_et_inclinaison_reste_jusqu_a_la_reprise(self):
+        robot = self.robot
+        robot.noir_gauche = robot.noir_droit = True
+        robot.rouler()
+        self.assertDiagnostic(robot, 0x0000FF)
+        robot.noir_gauche = robot.noir_droit = False
+        robot.poser()
+        self.assertEqual(robot.capitaine.signaleur.diagnostic, 0)
+        robot.roll = 35
+        robot.rouler()
+        robot.temps += robot.valeurs["MS_INCLINAISON"]
+        robot.rouler()
+        self.assertDiagnostic(robot, 0x00FFFF)
+        robot.roll = 0
+        robot.rouler()
+        self.assertDiagnostic(robot, 0x00FFFF)
+        robot.temps += robot.valeurs["MS_BLANC"]
+        robot.rouler()
+        self.assertEqual(robot.capitaine.signaleur.diagnostic, 0)
+        self.assertIn(("pixel_on", (2, 0)), robot.signaux)
+
+    def test_diagnostic_obstacle_et_magnetometre_reste_apres_arret(self):
+        robot = self.robot
+        robot.poser()
+        robot.distance = 5
+        robot.temps += 150
+        robot.rouler()
+        self.assertDiagnostic(robot, 0xFF8000)
+        robot.temps += 200
+        robot.rouler()
+        robot.temps += 350
+        robot.rouler()
+        robot.force_x = robot.force_z = 0
+        robot.rouler()
+        self.assertDiagnostic(robot, 0x8000FF)
+        robot.temps += 1000
+        robot.rouler()
+        self.assertDiagnostic(robot, 0x8000FF)
+        robot.boutons[3]()
+        self.assertDiagnostic(robot, 0x8000FF)
+
+    def test_diagnostics_des_autres_arrets(self):
+        for cause, couleur in (("sans_rotation", 0x8000FF),
+                               ("delai_pivot", 0xFF0080),
+                               ("distance", 0xFFFF00),
+                               ("boutons", 0xFFFFFF)):
+            with self.subTest(cause=cause):
+                robot = Materiel()
+                robot.poser()
+                if cause == "boutons":
+                    robot.boutons[3]()
+                elif cause == "distance":
+                    robot.capitaine.ordonner_un_pivot()
+                    robot.terminer_pivot()
+                    robot.distance = 0
+                    robot.temps = robot.capitaine.fin_verification
+                    robot.rouler()
+                else:
+                    robot.capitaine.ordonner_un_pivot()
+                    robot.temps = (robot.capitaine.debut_pivot +
+                                   robot.valeurs["MS_PIVOT_MAX"] if cause == "delai_pivot"
+                                   else robot.capitaine.dernier_progres +
+                                   robot.valeurs["MS_SANS_ROTATION"])
+                    robot.rouler()
+                self.assertEqual(robot.capitaine.etat, robot.valeurs["ARRET_SECURITE"])
+                self.assertDiagnostic(robot, couleur)
 
     def test_urgence_pendant_commande_moteur_coupe_les_roues(self):
         robot = self.robot
@@ -210,13 +294,14 @@ class VoyageAutonomeTest(unittest.TestCase):
 
         def commander_et_interrompre(*args):
             robot.commandes.append(("moteur", args))
-            robot.capitaine.declarer_l_urgence("boutons A+B")
+            robot.boutons[3]()
 
         robot.valeurs["RobotActionneurs"].change_motor = commander_et_interrompre
         robot.temps += 150
         robot.rouler()
         self.assertEqual(robot.capitaine.etat, robot.valeurs["ARRET_SECURITE"])
         self.assertEqual(robot.commandes[-1], ("mouvement", (0,)))
+        self.assertDiagnostic(robot, 0xFFFFFF)
 
     def test_urgence_pendant_mesure_ultrason_ne_relance_pas_les_moteurs(self):
         robot = self.robot
@@ -224,13 +309,14 @@ class VoyageAutonomeTest(unittest.TestCase):
         commandes_avant = len(robot.commandes)
 
         def mesure_interrompue():
-            robot.capitaine.declarer_l_urgence("boutons A+B")
+            robot.boutons[3]()
             return 80
 
         robot.valeurs["RobotCapteurs"].distance_cm = mesure_interrompue
         robot.temps += 150
         robot.rouler()
         self.assertEqual(robot.capitaine.etat, robot.valeurs["ARRET_SECURITE"])
+        self.assertDiagnostic(robot, 0xFFFFFF)
         self.assertEqual(robot.commandes[-1], ("mouvement", (0,)))
         self.assertEqual(len(robot.commandes), commandes_avant + 1)
 
@@ -241,7 +327,7 @@ class VoyageAutonomeTest(unittest.TestCase):
         robot.terminer_pivot()
 
         def mesure_interrompue():
-            robot.capitaine.declarer_l_urgence("boutons A+B")
+            robot.boutons[3]()
             return 100
 
         robot.valeurs["RobotCapteurs"].distance_cm = mesure_interrompue
@@ -310,12 +396,13 @@ class VoyageAutonomeTest(unittest.TestCase):
         robot.capitaine.ordonner_un_pivot()
         self.assertEqual(robot.capitaine.etat, robot.valeurs["ARRET_SECURITE"])
         self.assertEqual(robot.commandes[-1], ("mouvement", (0,)))
+        self.assertDiagnostic(robot, 0x8000FF)
 
     def test_urgence_pendant_lecture_magnetique_interdit_le_pivot(self):
         robot = self.robot
         robot.poser()
         def lecture_interrompue(axe):
-            robot.capitaine.declarer_l_urgence("boutons A+B")
+            robot.boutons[3]()
             return 100
 
         robot.valeurs["input"].magnetic_force = lecture_interrompue
@@ -329,7 +416,7 @@ class VoyageAutonomeTest(unittest.TestCase):
         robot.capitaine.ordonner_un_pivot()
 
         def lecture_interrompue(axe):
-            robot.capitaine.declarer_l_urgence("boutons A+B")
+            robot.boutons[3]()
             return 100
 
         robot.valeurs["input"].magnetic_force = lecture_interrompue
